@@ -704,6 +704,77 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, script_
     return project_path
 
 
+def _replace_with_no_test_templates(project_path: Path, tracker: StepTracker = None):
+    """Replace templates with no-test versions if tests are not wanted."""
+    specify_dir = project_path / ".specify"
+    if not specify_dir.exists():
+        return
+
+    templates_dir = specify_dir / "templates"
+    if not templates_dir.exists():
+        return
+
+    # For now, just create a simple no-test version by modifying key sections
+    plan_template = templates_dir / "plan-template.md"
+    if plan_template.exists():
+        try:
+            content = plan_template.read_text()
+
+            # Replace testing section
+            content = content.replace("**Testing**: [e.g., pytest, XCTest, cargo test or NEEDS CLARIFICATION]", "**Testing**: [None - development without tests]")
+
+            # Remove test directories from project structure
+            content = content.replace("tests/\n├── contract/\n├── integration/\n└── unit/\n\n", "")
+            content = content.replace("└── tests/\n\n", "")
+            content = content.replace("└── tests\n\n", "")
+
+            # Replace TDD content
+            content = content.replace("TDD order: Tests before implementation", "Dependency order: Models before services before UI")
+            content = content.replace("MUST FAIL before ANY implementation", "ready for implementation")
+
+            plan_template.write_text(content)
+            if tracker:
+                tracker.add("no-test-plan", "Removed test requirements from plan template")
+                tracker.complete("no-test-plan", "✓")
+        except Exception as e:
+            if tracker:
+                tracker.error("template-edit", f"Failed to edit plan template: {e}")
+
+    tasks_template = templates_dir / "tasks-template.md"
+    if tasks_template.exists():
+        try:
+            content = tasks_template.read_text()
+
+            # Remove test phases
+            lines = content.split('\n')
+            filtered_lines = []
+            in_test_phase = False
+
+            for line in lines:
+                if 'Phase 3.2: Tests First (TDD)' in line:
+                    in_test_phase = True
+                    continue
+                if in_test_phase and line.startswith('## Phase'):
+                    in_test_phase = False
+                if in_test_phase:
+                    continue
+
+                # Remove individual test tasks
+                if any(phrase in line for phrase in ['test', 'Test']):
+                    continue
+
+                filtered_lines.append(line)
+
+            if len(filtered_lines) < len(lines):
+                tasks_template.write_text('\n'.join(filtered_lines))
+                if tracker:
+                    tracker.add("no-test-tasks", "Removed test tasks from tasks template")
+                    tracker.complete("no-test-tasks", "✓")
+        except Exception as e:
+            if tracker:
+                tracker.error("template-edit", f"Failed to edit tasks template: {e}")
+
+
 def ensure_executable_scripts(project_path: Path, tracker: StepTracker | None = None) -> None:
     """Ensure POSIX .sh scripts under .specify/scripts (recursively) have execute bits (no-op on Windows)."""
     if os.name == "nt":
@@ -755,6 +826,7 @@ def init(
     script_type: str = typer.Option(None, "--script", help="Script type to use: sh or ps"),
     ignore_agent_tools: bool = typer.Option(False, "--ignore-agent-tools", help="Skip checks for AI agent tools like Claude Code"),
     no_git: bool = typer.Option(False, "--no-git", help="Skip git repository initialization"),
+    no_tests: bool = typer.Option(False, "--no-tests", help="Skip test-related templates and TDD workflow (no test directories or test-first tasks)"),
     here: bool = typer.Option(False, "--here", help="Initialize project in the current directory instead of creating a new one"),
     force: bool = typer.Option(False, "--force", help="Force merge/overwrite when using --here (skip confirmation)"),
     skip_tls: bool = typer.Option(False, "--skip-tls", help="Skip SSL/TLS verification (not recommended)"),
@@ -784,6 +856,7 @@ def init(
         specify init my-project --ai windsurf
         specify init my-project --ai auggie
         specify init my-project --ai q
+        specify init my-project --ai claude --no-tests  # Skip TDD/test requirements
         specify init --ignore-agent-tools my-project
         specify init . --ai claude         # Initialize in current directory
         specify init .                     # Initialize in current directory (interactive AI selection)
@@ -875,11 +948,35 @@ def init(
     else:
         # Use arrow-key selection interface
         selected_ai = select_with_arrows(
-            AI_CHOICES, 
-            "Choose your AI assistant:", 
+            AI_CHOICES,
+            "Choose your AI assistant:",
             "copilot"
         )
-    
+
+    # Test preference selection (only if not explicitly set via flag)
+    if no_tests:
+        use_tests = False
+        console.print(f"[cyan]Selected: No tests (faster development)[/cyan]")
+    else:
+        console.print(f"[red]NOT SELECTED")
+        # Interactive test preference selection
+        test_choices = {
+            "with-tests": "Include tests (TDD workflow)",
+            "without-tests": "Skip tests (faster development)"
+        }
+
+        test_preference = select_with_arrows(
+            test_choices,
+            "Choose your testing approach:",
+            "with-tests"  # Default to include tests for backward compatibility
+        )
+
+        use_tests = test_preference == "with-tests"
+        if use_tests:
+            console.print(f"[cyan]Selected: Tests included (TDD workflow)[/cyan]")
+        else:
+            console.print(f"[cyan]Selected: No tests (faster development)[/cyan]")
+
     # Check agent tools unless ignored
     if not ignore_agent_tools:
         agent_tool_missing = False
@@ -981,6 +1078,10 @@ def init(
             local_client = httpx.Client(verify=local_ssl_context)
 
             download_and_extract_template(project_path, selected_ai, selected_script, here, verbose=False, tracker=tracker, client=local_client, debug=debug, github_token=github_token)
+
+            # If tests are not wanted, replace templates with no-test versions
+            if not use_tests:
+                _replace_with_no_test_templates(project_path, tracker)
 
             # Ensure scripts are executable (POSIX)
             ensure_executable_scripts(project_path, tracker=tracker)

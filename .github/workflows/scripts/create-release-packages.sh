@@ -131,19 +131,79 @@ build_variant() {
       echo "Warning: no plan-template script command found for $script in YAML frontmatter" >&2
     fi
   fi
-  # NOTE: We substitute {ARGS} internally. Outward tokens differ intentionally:
-  #   * Markdown/prompt (claude, copilot, cursor, opencode): $ARGUMENTS
-  #   * TOML (gemini, qwen): {{args}}
-  # This keeps formats readable without extra abstraction.
+}
 
+build_variant_no_tests() {
+  local agent=$1 script=$2
+  local base_dir="$GENRELEASES_DIR/sdd-${agent}-package-${script}-no-tests"
+  echo "Building $agent ($script) package (no tests)..."
+  mkdir -p "$base_dir"
+
+  # Copy base structure but filter scripts by variant
+  SPEC_DIR="$base_dir/.specify"
+  mkdir -p "$SPEC_DIR"
+
+  [[ -d memory ]] && { cp -r memory "$SPEC_DIR/"; echo "Copied memory -> .specify"; }
+
+  # Only copy the relevant script variant directory
+  if [[ -d scripts ]]; then
+    mkdir -p "$SPEC_DIR/scripts"
+    case $script in
+      sh)
+        [[ -d scripts/bash ]] && { cp -r scripts/bash "$SPEC_DIR/scripts/"; echo "Copied scripts/bash -> .specify/scripts"; }
+        # Copy any script files that aren't in variant-specific directories
+        find scripts -maxdepth 1 -type f -exec cp {} "$SPEC_DIR/scripts/" \; 2>/dev/null || true
+        ;;
+      ps)
+        [[ -d scripts/powershell ]] && { cp -r scripts/powershell "$SPEC_DIR/scripts/"; echo "Copied scripts/powershell -> .specify/scripts"; }
+        # Copy any script files that aren't in variant-specific directories
+        find scripts -maxdepth 1 -type f -exec cp {} "$SPEC_DIR/scripts/" \; 2>/dev/null || true
+        ;;
+    esac
+  fi
+
+  # Copy templates with no-tests variants
+  if [[ -d templates ]]; then
+    mkdir -p "$SPEC_DIR/templates"
+    # Copy all template files except commands
+    find templates -type f -not -path "templates/commands/*" -exec cp --parents {} "$SPEC_DIR"/ \;
+    # Replace plan and tasks templates with no-tests versions
+    if [[ -f templates/plan-template-no-tests.md ]]; then
+      cp templates/plan-template-no-tests.md "$SPEC_DIR/templates/plan-template.md"
+    fi
+    if [[ -f templates/tasks-template-no-tests.md ]]; then
+      cp templates/tasks-template-no-tests.md "$SPEC_DIR/templates/tasks-template.md"
+    fi
+    echo "Copied templates -> .specify/templates (no-tests variants)"
+  fi
+
+  # Process plan template
+  local plan_tpl="$base_dir/.specify/templates/plan-template.md"
+  if [[ -f "$plan_tpl" ]]; then
+    plan_norm=$(tr -d '\r' < "$plan_tpl")
+    # Extract script command from YAML frontmatter
+    script_command=$(printf '%s\n' "$plan_norm" | awk -v sv="$script" '/^[[:space:]]*'"$script"':[[:space:]]*/ {sub(/^[[:space:]]*'"$script"':[[:space:]]*/, ""); print; exit}')
+    if [[ -n $script_command ]]; then
+      # Always prefix with .specify/ for plan usage
+      script_command=".specify/$script_command"
+      # Replace {SCRIPT} placeholder with the script command and __AGENT__ with agent name
+      substituted=$(sed "s|{SCRIPT}|${script_command}|g" "$plan_tpl" | tr -d '\r' | sed "s|__AGENT__|${agent}|g")
+      # Strip YAML frontmatter from plan template output (keep body only)
+      stripped=$(printf '%s\n' "$substituted" | awk 'BEGIN{fm=0;dash=0} /^---$/ {dash++; if(dash==1){fm=1; next} else if(dash==2){fm=0; next}} {if(!fm) print}')
+      printf '%s\n' "$stripped" > "$plan_tpl"
+    else
+      echo "Warning: no plan-template script command found for $script in YAML frontmatter" >&2
+    fi
+  fi
+
+  # Build agent-specific directories (same as regular variant)
   case $agent in
     claude)
       mkdir -p "$base_dir/.claude/commands"
       generate_commands claude md "\$ARGUMENTS" "$base_dir/.claude/commands" "$script" ;;
     gemini)
       mkdir -p "$base_dir/.gemini/commands"
-      generate_commands gemini toml "{{args}}" "$base_dir/.gemini/commands" "$script"
-      [[ -f agent_templates/gemini/GEMINI.md ]] && cp agent_templates/gemini/GEMINI.md "$base_dir/GEMINI.md" ;;
+      generate_commands gemini toml "{{args}}" "$base_dir/.gemini/commands" "$script" ;;
     copilot)
       mkdir -p "$base_dir/.github/prompts"
       generate_commands copilot prompt.md "\$ARGUMENTS" "$base_dir/.github/prompts" "$script" ;;
@@ -152,8 +212,7 @@ build_variant() {
       generate_commands cursor md "\$ARGUMENTS" "$base_dir/.cursor/commands" "$script" ;;
     qwen)
       mkdir -p "$base_dir/.qwen/commands"
-      generate_commands qwen toml "{{args}}" "$base_dir/.qwen/commands" "$script"
-      [[ -f agent_templates/qwen/QWEN.md ]] && cp agent_templates/qwen/QWEN.md "$base_dir/QWEN.md" ;;
+      generate_commands qwen toml "{{args}}" "$base_dir/.qwen/commands" "$script" ;;
     opencode)
       mkdir -p "$base_dir/.opencode/command"
       generate_commands opencode md "\$ARGUMENTS" "$base_dir/.opencode/command" "$script" ;;
@@ -176,16 +235,26 @@ build_variant() {
       mkdir -p "$base_dir/.amazonq/prompts"
       generate_commands q md "\$ARGUMENTS" "$base_dir/.amazonq/prompts" "$script" ;;
   esac
-  ( cd "$base_dir" && zip -r "../spec-kit-template-${agent}-${script}-${NEW_VERSION}.zip" . )
-  echo "Created $GENRELEASES_DIR/spec-kit-template-${agent}-${script}-${NEW_VERSION}.zip"
+  ( cd "$base_dir" && zip -r "../spec-kit-template-${agent}-${script}-${NEW_VERSION}-no-tests.zip" . )
+  echo "Created $GENRELEASES_DIR/spec-kit-template-${agent}-${script}-${NEW_VERSION}-no-tests.zip"
 }
 
 # Determine agent list
-ALL_AGENTS=(claude gemini copilot cursor qwen opencode windsurf codex kilocode auggie roo q)
-ALL_SCRIPTS=(sh ps)
+for agent in "${AGENT_LIST[@]}"; do
+  for script in "${SCRIPT_LIST[@]}"; do
+    build_variant "$agent" "$script"
+  done
+done
 
-
-norm_list() {
+# Build no-tests templates if requested
+if [[ "${NO_TESTS:-false}" == "true" ]]; then
+  echo "Building no-tests variants..."
+  for agent in "${AGENT_LIST[@]}"; do
+    for script in "${SCRIPT_LIST[@]}"; do
+      build_variant_no_tests "$agent" "$script"
+    done
+  done
+fi
   # convert comma+space separated -> space separated unique while preserving order of first occurrence
   tr ',\n' '  ' | awk '{for(i=1;i<=NF;i++){if(!seen[$i]++){printf((out?" ":"") $i)}}}END{printf("\n")}'
 }
