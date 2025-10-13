@@ -6,7 +6,7 @@ set -euo pipefail
 # Usage: .github/workflows/scripts/create-release-packages.sh <version>
 #   Version argument should include leading 'v'.
 #   Optionally set AGENTS and/or SCRIPTS env vars to limit what gets built.
-#     AGENTS  : space or comma separated subset of: claude gemini copilot cursor qwen opencode windsurf codex (default: all)
+#     AGENTS  : space or comma separated subset of: claude gemini copilot cursor-agent qwen opencode windsurf codex (default: all)
 #     SCRIPTS : space or comma separated subset of: sh ps (default: both)
 #   Examples:
 #     AGENTS=claude SCRIPTS=sh $0 v0.2.0
@@ -91,6 +91,7 @@ generate_commands() {
     
     case $ext in
       toml)
+        body=$(printf '%s\n' "$body" | sed 's/\\/\\\\/g')
         { echo "description = \"$description\""; echo; echo "prompt = \"\"\""; echo "$body"; echo "\"\"\""; } > "$output_dir/speckit.$name.$ext" ;;
       md)
         echo "$body" > "$output_dir/speckit.$name.$ext" ;;
@@ -151,7 +152,7 @@ build_variant() {
   fi
 
   # NOTE: We substitute {ARGS} internally. Outward tokens differ intentionally:
-  #   * Markdown/prompt (claude, copilot, cursor, opencode): $ARGUMENTS
+  #   * Markdown/prompt (claude, copilot, cursor-agent, opencode): $ARGUMENTS
   #   * TOML (gemini, qwen): {{args}}
   # This keeps formats readable without extra abstraction.
 }
@@ -234,9 +235,9 @@ build_variant_no_tests() {
       mkdir -p "$base_dir/.vscode"
       [[ -f templates/vscode-settings.json ]] && cp templates/vscode-settings.json "$base_dir/.vscode/settings.json"
       ;;
-    cursor)
+    cursor-agent)
       mkdir -p "$base_dir/.cursor/commands"
-      generate_commands cursor md "\$ARGUMENTS" "$base_dir/.cursor/commands" "$script" ;;
+      generate_commands cursor-agent md "\$ARGUMENTS" "$base_dir/.cursor/commands" "$script" ;;
     qwen)
       mkdir -p "$base_dir/.qwen/commands"
       generate_commands qwen toml "{{args}}" "$base_dir/.qwen/commands" "$script" ;;
@@ -258,6 +259,10 @@ build_variant_no_tests() {
     roo)
       mkdir -p "$base_dir/.roo/commands"
       generate_commands roo md "\$ARGUMENTS" "$base_dir/.roo/commands" "$script" ;;
+    codebuddy)
+      mkdir -p "$base_dir/.codebuddy/commands"
+      generate_commands codebuddy md "\$ARGUMENTS" "$base_dir/.codebuddy/commands" "$script" ;;
+
     q)
       mkdir -p "$base_dir/.amazonq/prompts"
       generate_commands q md "\$ARGUMENTS" "$base_dir/.amazonq/prompts" "$script" ;;
@@ -267,21 +272,10 @@ build_variant_no_tests() {
 }
 
 # Determine agent list
-for agent in "${AGENT_LIST[@]}"; do
-  for script in "${SCRIPT_LIST[@]}"; do
-    build_variant "$agent" "$script"
-  done
-done
+ALL_AGENTS=(claude gemini copilot cursor-agent qwen opencode windsurf codex kilocode auggie roo codebuddy q)
+ALL_SCRIPTS=(sh ps)
 
-# Build no-tests templates if requested
-if [[ "${NO_TESTS:-false}" == "true" ]]; then
-  echo "Building no-tests variants..."
-  for agent in "${AGENT_LIST[@]}"; do
-    for script in "${SCRIPT_LIST[@]}"; do
-      build_variant_no_tests "$agent" "$script"
-    done
-  done
-fi
+norm_list() {
   # convert comma+space separated -> space separated unique while preserving order of first occurrence
   tr ',\n' '  ' | awk '{for(i=1;i<=NF;i++){if(!seen[$i]++){printf((out?" ":"") $i)}}}END{printf("\n")}'
 }
